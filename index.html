@@ -1,0 +1,179 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Checador Facial Millet - Externo</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@4.6.2/dist/css/bootstrap.min.css">
+    <script src="https://unpkg.com/html5-qrcode"></script>
+    <script src="https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js"></script>
+    <style>
+        :root { --primary-blue: #0d5c75; --panel-bg: #93abbc; }
+        body { background-color: #f4f7f9; font-family: sans-serif; padding: 20px; }
+        .card-panel { background-color: var(--panel-bg); border-radius: 40px; padding: 30px; max-width: 500px; margin: auto; box-shadow: 0 4px 15px rgba(0,0,0,0.2); }
+        #reader { width: 100%; background: #000; border-radius: 20px; overflow: hidden; }
+        .btn-iniciar { background-color: var(--primary-blue); color: white; font-weight: bold; padding: 15px; border-radius: 15px; width: 100%; border: none; }
+        .status { text-align: center; color: white; font-weight: bold; margin-top: 10px; }
+        .loading-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background: white; z-index: 1000; display: flex; flex-direction: column; justify-content: center; align-items: center; }
+    </style>
+</head>
+<body>
+
+<div id="loading" class="loading-overlay">
+    <div class="spinner-border text-primary"></div>
+    <p class="mt-2">Iniciando sistema y cargando IA...</p>
+</div>
+
+<div class="container">
+    <div id="pantalla-inicio" class="card-panel">
+        <h4 class="text-center text-white mb-4">SISTEMA MILLET</h4>
+        <label class="font-weight-bold text-white">SUCURSAL:</label>
+        <select id="sel-sucursal" class="form-control mb-4"></select>
+        <button class="btn-iniciar" onclick="cambiarPantalla('checador')">INICIAR CHECADOR</button>
+        <button class="btn btn-link btn-sm w-100 mt-3 text-white" onclick="cambiarPantalla('config')">⚙️ Configuración</button>
+    </div>
+
+    <div id="pantalla-camara" class="card-panel d-none">
+        <h3 id="txt-titulo" class="text-white text-center mb-3"></h3>
+        <div id="reader"></div>
+        <div id="txt-status" class="status">Cargando cámara...</div>
+        
+        <div id="controles-config" class="d-none mt-3">
+            <input type="text" id="reg-nombre" class="form-control mb-2" placeholder="Nombre completo">
+            <input type="number" id="reg-id" class="form-control mb-2" placeholder="ID Empleado">
+            <button class="btn btn-warning w-100" onclick="capturarRostro()">📸 CAPTURAR (0/3)</button>
+        </div>
+
+        <button class="btn btn-dark w-100 mt-4" onclick="location.reload()">VOLVER</button>
+    </div>
+</div>
+
+<script>
+    // --- CONFIGURACIÓN ---
+    const WEB_APP_URL = "https://script.google.com/macros/s/AKfycbzWMJJlBfbBkL-o_HOGYcuagg_iOPEJEqBNBPRCNH1zRubIaYryoEGl0HDR7Zbk5ZGe0w/exec"; 
+    
+    let html5Qr = new Html5Qrcode("reader");
+    let faceMatcher = null;
+    let tempDescs = [];
+    let modoActual = "";
+
+    window.onload = async () => {
+        try {
+            // Cargar IA
+            const MODEL_URL = 'https://cdn.jsdelivr.net/gh/justadudewhohacks/face-api.js/weights';
+            await Promise.all([
+                faceapi.nets.tinyFaceDetector.loadFromUri(MODEL_URL),
+                faceapi.nets.faceLandmark68Net.loadFromUri(MODEL_URL),
+                faceapi.nets.faceRecognitionNet.loadFromUri(MODEL_URL)
+            ]);
+
+            // Cargar Datos de Google Sheets
+            const resp = await fetch(WEB_APP_URL, { 
+                method: 'POST', 
+                body: JSON.stringify({ action: "getInitialData" }) 
+            });
+            const data = await resp.json();
+
+            // Llenar sucursales
+            const sel = document.getElementById("sel-sucursal");
+            data.sucursales.forEach(s => {
+                let o = document.createElement("option"); o.text = s; sel.add(o);
+            });
+
+            // Llenar Base de Rostros
+            if (data.rostros.length > 0) {
+                const labeled = data.rostros.map(r => {
+                    const d = JSON.parse(r[2]).map(arr => new Float32Array(arr));
+                    return new faceapi.LabeledFaceDescriptors(r[1], d);
+                });
+                faceMatcher = new faceapi.FaceMatcher(labeled, 0.55);
+            }
+
+            document.getElementById("loading").classList.add("d-none");
+        } catch (e) {
+            alert("Error al iniciar: " + e);
+        }
+    };
+
+    async function cambiarPantalla(modo) {
+        modoActual = modo;
+        document.getElementById("pantalla-inicio").classList.add("d-none");
+        document.getElementById("pantalla-camara").classList.remove("d-none");
+        
+        if(modo === 'config') {
+            document.getElementById("txt-titulo").innerText = "REGISTRO";
+            document.getElementById("controles-config").classList.remove("d-none");
+        } else {
+            document.getElementById("txt-titulo").innerText = document.getElementById("sel-sucursal").value;
+        }
+
+        // Iniciar Cámara
+        await html5Qr.start({ facingMode: "user" }, { fps: 10, qrbox: 250 }, () => {});
+        document.getElementById("txt-status").innerText = "Cámara lista";
+        if(modo === 'checador') bucleIA();
+    }
+
+    async function capturarRostro() {
+        const video = document.querySelector("#reader video");
+        const det = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
+        
+        if(!det) return alert("No se detecta rostro");
+
+        tempDescs.push(Array.from(det.descriptor));
+        document.querySelector("#controles-config button").innerText = `📸 CAPTURAR (${tempDescs.length}/3)`;
+
+        if(tempDescs.length >= 3) {
+            const nombre = document.getElementById("reg-nombre").value;
+            const id = document.getElementById("reg-id").value;
+            if(!nombre || !id) return alert("ID y Nombre son obligatorios");
+
+            document.getElementById("txt-status").innerText = "Guardando...";
+            await fetch(WEB_APP_URL, {
+                method: 'POST',
+                mode: 'no-cors', // Para evitar problemas de seguridad local
+                body: JSON.stringify({
+                    action: "registrarUsuario",
+                    nombre: nombre,
+                    id: id,
+                    descriptores: JSON.stringify(tempDescs)
+                })
+            });
+            alert("Usuario guardado correctamente");
+            location.reload();
+        }
+    }
+
+    async function bucleIA() {
+        if(modoActual !== 'checador' || !html5Qr.isScanning) return;
+        const video = document.querySelector("#reader video");
+        
+        if(video && faceMatcher) {
+            const det = await faceapi.detectSingleFace(video, new faceapi.TinyFaceDetectorOptions()).withFaceLandmarks().withFaceDescriptor();
+            if(det) {
+                const match = faceMatcher.findBestMatch(det.descriptor);
+                if(match.label !== "unknown") {
+                    const status = document.getElementById("txt-status");
+                    status.innerText = "¡HOLA " + match.label + "!";
+                    status.style.color = "#00ff00";
+
+                    fetch(WEB_APP_URL, {
+                        method: 'POST', mode: 'no-cors',
+                        body: JSON.stringify({
+                            action: "registrarChecada",
+                            nombre: match.label,
+                            sucursal: document.getElementById("txt-titulo").innerText
+                        })
+                    });
+
+                    await new Promise(r => setTimeout(r, 5000));
+                    status.innerText = "Buscando rostro...";
+                    status.style.color = "white";
+                }
+            }
+        }
+        requestAnimationFrame(bucleIA);
+    }
+</script>
+
+</body>
+</html>
